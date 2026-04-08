@@ -1,0 +1,134 @@
+from typing import Tuple, Dict
+import sounddevice as sd
+import time
+import numpy as np
+from scipy.io import wavfile
+import tkinter as tk
+from tkinter import filedialog
+
+# List of devices to connect to
+# The actual device name cannot be predicted, but it should at least contain the
+# specified string
+DEVICES = [
+    "HSD mk.I",
+    "HSD mk.ii",
+    "HSD mk.iii"
+    "SKINETIC",
+]
+CHANNELS = {
+    13: ('t1', '-'),
+    11: ('t2', '-'),
+    9: ('ff1', '-'),
+    8: ('ff2', '-'),
+    18: ('ff3', '-'),
+    5: ('mf1', '-'), #???
+    17: ('mf2', '-'),
+    4: ('rf1', '-'),
+    7: ('rf2', '-'),
+    3: ('p1', '-'),
+    6: ('p2', '-'),
+    10: ('palm11', '-'),
+    1: ('palm12', '-'),
+    2: ('palm13', '+'),
+    12: ('palm21', '-'),
+    0: ('palm22', '+'),
+    16: ('palm23', '-'),
+    14: ('palm31', '-'),
+    15: ('palm32', '-'),
+    19: ('palm33', '-')
+}
+# List of API that can be used
+APIS = [
+    "Windows WDM-KS",
+    "Windows WASAPI",
+]
+
+SPR = 48000  # Hz
+duration = 60  # seconds
+
+# Open a file dialog to select a WAV file
+root = tk.Tk()
+root.withdraw()
+file_path = filedialog.askopenfilename(
+    title="Select a WAV file", filetypes=[("WAV files", "*.wav")]
+)
+def modify_signal(data: np.ndarray) -> np.ndarray:
+    modified_signal = data.copy().astype('int16')
+    for channel, (_, operation) in CHANNELS.items():
+        if operation == '-':
+            modified_signal[:, channel] = -2 * np.abs(modified_signal[:, channel])
+        elif operation == '+':
+            modified_signal[:, channel] = 2 * np.abs(modified_signal[:, channel])
+    return modified_signal
+# Load the selected WAV file
+fs, data = wavfile.read(file_path)
+data_length = len(data)
+
+# Create a list of 20 channels, each containing the audio data
+SIGNALS = []
+for i in range(20):
+    if i == 1:  # Put the signal only in the first channel
+        SIGNALS.append(data.astype('int16'))
+    else:
+        SIGNALS.append(np.zeros(data_length, dtype='int16'))
+SIGNALS=modify_signal
+X = 0
+def stream_callback(data: np.ndarray, frames: int, _, __):
+    global X
+    end_reached = False
+    for c in range(data.shape[1]):
+        r = len(SIGNALS[c]) - X
+        if frames > r:
+            data[0:r, c] = SIGNALS[c][X:X+r]
+            data[r:, c].fill(0)
+            end_reached = True
+        else:
+            data[:, c] = SIGNALS[c][X:X+frames]
+    X += frames
+    if end_reached:
+        X = 0
+        raise sd.CallbackStop
+
+
+def find_device(device_list: sd.DeviceList, api_list: Tuple[Dict]) -> int:
+    for i, device in enumerate(device_list):
+        if api_list[device['hostapi']]['name'] in APIS:
+            for d in DEVICES:
+                if d in device['name']:
+                    return i
+    raise OSError
+
+
+
+available_devices = sd.query_devices()
+available_apis = sd.query_hostapis()
+print("Available devices:")
+print(available_devices)
+print()
+print("Available APIs:")
+for api in available_apis:
+    print(api['name'], ": Devices", api['devices'])
+print()
+
+try:
+    device_id = find_device(available_devices, available_apis)
+except OSError:
+    print("No compatible device found")
+    print("If your device is listed above, add the appropriate entries to the "
+          "lists 'DEVICES' and 'APIS' to allow connection")
+    print("Otherwise, check wiring and power supply and try again")
+    quit()
+print("Start streaming on device", device_id)
+print("Ctrl+C to stop")
+try:
+    out_stream = sd.OutputStream(
+        samplerate=SPR, blocksize=0, device=device_id, channels=20,
+        dtype='int16', latency='low', callback=stream_callback)
+    out_stream.start()
+    while out_stream.active:
+        time.sleep(0.5)
+except KeyboardInterrupt:
+    pass
+finally:
+    out_stream.stop()
+    print("End of streaming")
